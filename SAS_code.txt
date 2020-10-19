@@ -1,0 +1,402 @@
+ods graphics on;
+libname gal "[pathway]";
+
+/* the dataset was downloaded from the CDC site: */
+/* https://chronicdata.cdc.gov/Nutrition-Physical-Activity-and-Obesity/Nutrition-Physical-Activity-and-Obesity-Behavioral/hn4x-zwk7 */
+
+/* importing: */
+options validvarname=v7;
+/* (modifying columns name to adhere to SAS rules -simplifying future processing) */
+
+proc import datafile="/[pathway]/obesity.csv" dbms=csv 
+		out=gal.my_project_import replace;
+run;
+
+/* In a separate set, keep only variables of interest for this project */
+data gal.obese_lean;
+	length Region $10;
+	* creating a new colum that bundles states in regions since it's hard to visually compare 50 + data points;
+	set gal.my_project_import;
+	if LocationDesc in ("Maine" "Rhode I" "Vermont" "Connect" "New Ham" "Massach") 
+		then
+			Region="NE";
+	else if LocationDesc in ("New Yor" "New Jer" "Pennsyl") then
+		Region="MidAt";
+	else if LocationDesc in ("Virgini" "West Vi" "Kentuck" "Delawar" "Marylan" 
+		"Distcric" "North C" "South C" "Tenness" "Arkansa" "Louisia" "Florida" 
+		"Georgia" "Alabama" "Mississ") then
+			Region="Southrn";
+	else if LocationDesc in ("michiga" "North D" "South D" "Iowa" "Minniso" 
+		"Kansas" "Nebrask" "Ohio" "Indiana" "Illinoi" "Wiscons" "Missour") then
+			Region="MidWest";
+	else if LocationDesc in ("Texas" "Arizona" "New Mex" "Oklahom") then
+		Region="SouthWest";
+	else if LocationDesc in ("Montana" "Idaho" "Colorad" "Utah" "Wyoming" 
+		"Nevada") then
+			Region="RockyMount";
+	else if LocationDesc in ("Califor" "Oregon" "Washing") then
+		Region="Pacific";
+	else
+		Region="Territories";
+	keep YearEnd LocationDesc Region Class Topic Question Sample_Size 
+		StratificationCategory1 Stratification1 Data_Value;
+run;
+
+/* checking for missing numerical data: */
+proc univariate data=gal.obese_lean;
+	var Sample_Size Data_Value;
+run;
+/* There are 5046 missing values for sample size and same number for data values. */
+/* Curiously, it seems that when Sample_Size was missing, so was Data_Value: */
+data missing;
+	set gal.obese_lean;
+	if Data_Value <=.Z then output;
+	run;
+/* removing the missing values: */
+data gal.obese_clean;
+	set gal.obese_lean;
+	if Data_Value <=.Z then
+		delete;
+run;
+/* And they are now removed: */
+proc univariate data=gal.obese_clean;
+	var Sample_Size Data_Value;
+run;
+
+/* removing exact duplicates (note that the dataset is already sorted: */
+proc sort data=gal.obese_clean out=gal.obese_clean_unq noduprecs dupout=doubles;
+	by _all_;
+run;
+/* There are no duplicated rows.*/
+
+/* exploring the dataset:  */
+/* First, looking at the nominal / categorial data. */
+proc freq data=gal.obese_clean_unq;
+	tables YearEnd LocationDesc Question Stratification1;
+run;
+/*  The values seem OK (consistent, no missing values), but two main observations:  */
+/*  1. Not every state contributed equalty, and US territories contributed substantually less. */
+/*  2. More information, about twice as much, was gathered in uneven years compared to even.  */
+
+/* As for observation 1: */
+proc freq data=gal.obese_clean_unq;
+	tables LocationDesc * YearEnd / norow nocol nopercent;
+run;
+/* We see that data from Puerto Rico only started coming in 2013, From Guam in 2014, and from the Virgin Islands in 2016. */
+
+/* As for observation 2: */
+proc freq data=gal.obese_clean_unq;
+	tables YearEnd*Question / norow nocol nopercent;
+run;
+/*  note that some questions were only presented every other year. */
+
+/* Exploring the numeric data: */
+proc univariate data=gal.obese_clean_unq;
+	var Sample_Size Data_Value;
+run;
+/* Of note, the lowest value for Sample_Size Data_Value is 50. */
+/* Looks like 50 was the smallest sample size that was included. To confirm:  */
+proc freq data=gal.obese_clean_unq;
+	table Sample_Size;
+run;
+
+/* Some graphic resresentations: */
+
+/* Creating two datasets to present:   */
+%let year=2013;
+* This mactro variable is used to look seperatedly at each year.;
+
+data gal.exercise;
+	set gal.obese_clean_unq;
+	where Question in ("Percent of adults who achieve at least 150 minutes a week" 
+		"Percent of adults who achieve at least 300 minutes a week" 
+		"Percent of adults who engage in muscle-strengthening activ" 
+		"Percent of adults who engage in no leisure-time physical a");
+	/* to avoid one person contrubuting more than once: */
+	where also StratificationCategory1="Age (years)";
+	Where also YearEnd=&year;
+run;
+
+data gal.education;
+	set gal.obese_clean_unq;
+	where Question="Percent of adults aged 18 years and older who have obesity";
+	/* to avoid one person contrubuting more than once: */
+	where also StratificationCategory1="Education";
+	where also YearEnd=&year;
+	keep YearEnd LocationDesc Region Question Sample_Size Stratification1 
+		Data_Value;
+run;
+
+/* Bar chart: */
+proc sgplot data=gal.exercise;
+	title "% adults who exercice";
+	vbar Region / response=Data_Value stat=mean limitstat=stderr group=Question 
+		groupdisplay=cluster;
+	YAXIS LABEL='% of respondats' GRID VALUES=(0 TO 50 BY 5);
+run;
+/* Consistently in every area and every year, most adults report being engaged */
+/*  in leisure time exercise. Another surprising observations: Less obesity among*/
+/* those who don't exercise. */
+
+/* Box plot: */
+title 'prevelence of obesity varies with different level of education';
+proc sgplot data=gal.education;
+	vbox Data_Value / category=Region group=Stratification1;
+	yaxis label="% obese";
+run;
+/* Higher educations is associated with reduced prevelence of obesity. */
+
+/* Some statistical analysis: */
+/* ttest: */
+/* creating a dataset to compare obesity prevelence between males and females. */
+/* Again, to prevent one person represented more than once, looking at one year at a time. */
+data gal.obese_clean_gender;
+	set gal.obese_clean_unq;
+	where Question="Percent of adults aged 18 years and older who have obesity";
+	where also Stratification1 in ("Male" "Female");
+	where also YearEnd=&year;
+run;
+
+/* test: */
+PROC TTEST DATA=gal.obese_clean_gender;
+	CLASS Stratification1;
+	VAR Data_Value;
+RUN;
+/* No difference in prevelance of obesity between the two groups (P> 0.53 for unequal variance). */
+
+/* ANOVA: */
+proc anova data=gal.education;
+class Stratification1;
+model Data_Value=Stratification1;
+means Stratification1 / tukey plots=none;
+run;
+
+/* The results show that higher education is associated with lower prevalence of obesity. */
+/* Tukey test further indicates that prevalence of obesity is significantly (alpha < 0.05)  */
+/* lower in those with college degree than those who did not finish high school. The  */
+/* prevalence among those graduated from high school and those with some college /  */
+/* professional school is between the two, and statistically indistinguishable from each   */
+/* other. */
+
+/* Correlation: */
+/* We can look at correlation between eating little fruits, eating little vegetables, and obesity */
+/* For this end we need to build database that would lend itself to SAS grammar.  */
+/* This database extract data of people who eat little fruits. To avoid one person included  */
+/* more than once, only one stratification category (age) is kept. */
+data gal.fruits;
+	set gal.obese_clean_unq;
+	where Question like"%fruit%" and StratificationCategory1="Age (years)";
+	little_fruits=Data_Value;
+	*renaming the columns, the final file will have 3 data columns to be correlated.;
+	keep LocationDesc YearEnd Stratification1 little_fruits;
+
+proc sort data=gal.fruits;
+	*sorting needed before the merge;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+/* And in the same way extracting the data of people who eat little vegetables: */
+data gal.vegetables;
+	set gal.obese_clean_unq;
+	where Question like"%vegetables%" and StratificationCategory1="Age (years)";
+	little_vegetables=Data_Value;
+	keep LocationDesc YearEnd Stratification1 little_vegetables;
+
+proc sort data=gal.vegetables;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+/* Extracting the data on prevalence of obesity: */
+data gal.obese;
+	set gal.obese_clean_unq;
+	where Question like"%obesity%" and StratificationCategory1="Age (years)";
+	obesity=Data_Value;
+	keep LocationDesc YearEnd Stratification1 obesity;
+
+proc sort data=gal.obese;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+/* Creating a database with a separate column for each variable: */
+data gal.diet_obesity_corr;
+	merge gal.fruits gal.vegetables gal.obese;
+	by LocationDesc YearEnd Stratification1;
+	age=Stratification1;
+	drop Stratification1;
+run;
+
+/* correlation: */
+proc corr data=gal.diet_obesity_corr;
+	var little_fruits little_vegetables obesity;
+run;
+
+/* The three variables are each significantly correlated with the other. */
+/* The correlation coefficient between eating little fruits and eating little */
+/* vegetables is substantial (~0.64), and can be seen as a "positive control" - intuitively, */
+/* they should co-vary. The correlation between obesity and eating little fruits is positive */
+/* but very weak (~0.11), whereas eating little vegetable, moderately (~27%)  */
+/* and surprisingly negatively correlates with reduced prevalence of obesity! */
+
+/* Lasty, export of reports: */
+
+/* To Excell: */
+/* Writing existing data as Excell file: */
+libname xlout XLSX "[outpath]/income.xlsx";
+
+data xlout.income;
+	set gal.obese_clean_unq;
+	where Question="Percent of adults aged 18 years and older who have obesity";
+	where also StratificationCategory1="Income";
+	Income=Stratification1;
+	keep YearEnd LocationDesc Region Question Sample_Size Income Data_Value;
+run;
+
+proc means data=xlout.income;
+	vars Data_Value;
+	class Income;
+	output out=xlout.income_stat n=Count mean=average STD=STD;
+run;
+
+libname xlout clear;
+
+/* Exporting reports as a .pdf file and as a powerpoint slide: 
+Looking deeper into the relation between diet and obesity.  */
+
+/* The dataset for that:  */
+data gal.obese_veg;
+	keep noveg_a obe_a noveg_b obe_b noveg_c obe_c noveg_d obe_d noveg_e obe_e 
+		noveg_f obe_f;
+
+	/* names of new variables */
+	merge gal.diet_obesity_corr(where=(age="18 - 24") 
+		rename=(little_vegetables=noveg_a obesity=obe_a)) 
+		gal.diet_obesity_corr(where=(age="25 - 34") rename=(little_vegetables=noveg_b 
+		obesity=obe_b)) gal.diet_obesity_corr(where=(age="35 - 44") 
+		rename=(little_vegetables=noveg_c obesity=obe_c)) 
+		gal.diet_obesity_corr(where=(age="45 - 54") rename=(little_vegetables=noveg_d 
+		obesity=obe_d)) gal.diet_obesity_corr(where=(age="55 - 64") 
+		rename=(little_vegetables=noveg_e obesity=obe_e)) 
+		gal.diet_obesity_corr(where=(age="65 or older") 
+		rename=(little_vegetables=noveg_f obesity=obe_f));
+run;
+
+/* .pdf documnet:	 */
+ods pdf file="/[outpath]/obesity_diet_age.pdf" startpage=no;
+ods graphics / reset=all height=4in width=7in;
+ods escapechar='^';
+options nodate;
+title "Eating little vegetables vs. obesity";
+title3 "95% Prediction Ellipses for Each Group";
+
+proc sgplot data=gal.obese_veg;
+	scatter x=noveg_a y=obe_a / jitter name="a" legendlabel="18-24";
+	scatter x=noveg_b y=obe_b / jitter name="b" legendlabel="25-34";
+	scatter x=noveg_c y=obe_c / jitter name="c" legendlabel="35-44";
+	scatter x=noveg_d y=obe_d / jitter name="d" legendlabel="45-54";
+	scatter x=noveg_e y=obe_e / jitter name="e" legendlabel="55-64";
+	scatter x=noveg_f y=obe_f / jitter name="f" legendlabel="65 or older";
+	ellipse x=noveg_a y=obe_a / lineattrs=GraphData1 (thickness=3);
+	ellipse x=noveg_b y=obe_b / lineattrs=GraphData2 (thickness=3);
+	ellipse x=noveg_c y=obe_c / lineattrs=GraphData3 (thickness=3);
+	ellipse x=noveg_d y=obe_d / lineattrs=GraphData4 (thickness=3);
+	ellipse x=noveg_e y=obe_e / lineattrs=GraphData5 (thickness=3);
+	ellipse x=noveg_f y=obe_f / lineattrs=GraphData6 (thickness=3);
+	keylegend "a" "b" "c" "d" "e" "f"/ title="age groups:";
+	yaxis values=(0 to 70 by 10) label="prevelance of obesiy, %";
+	xaxis values=(5 to 55 by 10) label="low vegetable eaters,%";
+run;
+
+proc odstext;
+	p " " / style=[fontsize=12pt];
+	p "As we see, although for the population as a whole low vegetable eating is
+  associated with less prevalence of obesity, within age groups low vegetable eating
+  is associated with ^{style[font_style=italic]increased} prevalance of obesity. 
+  The association becomes stronger towards mid-age and weakens again at old age." 
+		/ style=[fontsize=12pt];
+	p "For a visual comparison, below is the (relatively high) association between not eating a lot of vegetable 
+  to not eating a lot of fruits." / 
+		style=[fontsize=12pt];
+	title "eating little vegerabels vs. obesity: 95% Prediction Ellipses";
+
+proc sgplot data=gal.diet_obesity_corr;
+	scatter x=little_vegetables y=little_fruits;
+	ellipse x=little_vegetables y=little_fruits 
+		/lineattrs=GraphData1 (thickness=3);
+	yaxis values=(0 to 70 by 10)label="low fruits eaters, %";
+	;
+	xaxis values=(5 to 55 by 10) label="low vegetable eaters,%";
+run;
+
+/* PowerPoint presentation, exploring the correlation between exercise and obesity: */
+ods powerpoint file="/outpath/example.pptx";
+
+/* Preparing the file */
+data gal.aerobic_high;
+	set gal.obese_clean_unq;
+	where Question like"%300%" and StratificationCategory1="Age (years)";
+	aerobic_high=Data_Value;
+	keep LocationDesc YearEnd Stratification1 aerobic_high;
+
+proc sort data=gal.aerobic_high;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+data gal.muscles;
+	set gal.obese_clean_unq;
+	where Question like"%muscle%" and StratificationCategory1="Age (years)";
+	muscles=Data_Value;
+	keep LocationDesc YearEnd Stratification1 muscles;
+
+proc sort data=gal.muscles;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+data gal.no_exercise;
+	set gal.obese_clean_unq;
+	where Question like"%leisure%" and StratificationCategory1="Age (years)";
+	no_exercise=Data_Value;
+	keep LocationDesc YearEnd Stratification1 no_exercise;
+
+proc sort data=gal.no_exercise;
+	by LocationDesc YearEnd Stratification1;
+run;
+
+/* Creating a database with a separate column for each variable: */
+data gal.all_exercise;
+	merge gal.aerobic_high gal.muscles gal.no_exercise gal.obese;
+	by LocationDesc YearEnd Stratification1;
+	age=Stratification1;
+	drop Stratification1;
+run;
+
+ods powerpoint file="[pathway]/obesity_exercise.pptx";
+title "Correlation between exercise habits and the prevalence of obesity" /style={fontsize=36pt};
+
+title;
+footnote;
+
+/* correlation: */
+proc corr data=gal.all_exercise;
+	var aerobic_high muscles no_exercise obesity;
+run;
+
+title;
+footnote;
+
+title "exercise habits vs. the prevalence of obesity" / style={fontsize=36pt};
+/* plot: */
+title "prevalence of obesity vs. exercise habits";
+proc sgplot data=gal.all_exercise noautolegend;
+	scatter x=obesity y=aerobic_high; 
+	ellipse x=obesity y=aerobic_high / name = "a" legendlabel="aerobic exercise";
+	scatter x=obesity y=muscles;
+	ellipse x=obesity y=muscles / name = "m" legendlabel = "muscle training";
+    scatter x=obesity y=no_exercise;
+	ellipse x=obesity y=no_exercise / name = "n" legendlabel = "not exercising";
+	keylegend "a" "m" "n" / title="exercise habits";
+	yaxis label="% in population";
+	xaxis label="prevelence of obesity, %";
+run;
+
+ods _all_ close;
+libname gal clear;
